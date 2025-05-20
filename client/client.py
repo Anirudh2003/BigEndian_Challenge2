@@ -1,116 +1,135 @@
-### MODULES
-import socket
-from socket import timeout
-import argparse
-import uuid
-import pickle
+# --- file: client/client.py ---
+import asyncio
+import ssl
 import os
-import hashlib
+import logging
+import argparse
+from cryptography import x509
+from cryptography.x509.oid import NameOID
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from datetime import datetime, timedelta
+from shared.config import STORAGE_DIR
+from server.integrity_checker import calculate_checksum
 
-### Pass Arguments to script via. Terminal
-parser = argparse.ArgumentParser(description="This is the client for the multi threaded socket server!")
-parser.add_argument("-n", "--name", type=str, default=str(uuid.uuid4()), help="Name of the Client")
-parser.add_argument('--ip', type=str, default=socket.gethostbyname(socket.gethostname()))
-parser.add_argument('--port', type=int, default=9000)
-parser.add_argument('--dir', type=str, default='./downloads')
-args = parser.parse_args()
+CERT_DIR = os.path.join(os.path.dirname(__file__), '..', 'certs')
+CA_CERT = os.path.join(CERT_DIR, 'ca.crt')
+CA_KEY = os.path.join(CERT_DIR, 'ca.key')
+CLIENT_CERT_DIR = os.path.join(CERT_DIR, 'clients')
 
-### PROTOCOL
-TIMEOUT_SECONDS = 10
-HEADER = 64
-PACKET = 2048
-FORMAT = 'utf-8'
-ADDR = (args.ip, args.port)
+SERVER_HOST = 'localhost'
+SERVER_PORT = 9000
 
-### MESSAGES
-DISCONNECT_MESSAGE = "!DISCONNECT"
-UPLOAD_FILE_MESSAGE = "!UPLOAD"
-SET_USERNAME_MESSAGE = "!SET_USERNAME"
-VERIFY_FILE = "!VERIFY_FILE"
-RESEND_FILE = "!RESEND_FILE"
-ACK_FILE = "!ACK_FILE"
+os.makedirs(CLIENT_CERT_DIR, exist_ok=True)
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+logger = logging.getLogger(__name__)
 
-def createSocket():
-    client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client.settimeout(TIMEOUT_SECONDS)
-    client.connect(ADDR)
-    return client
+def generate_client_cert(username):
+    cert_path = os.path.join(CLIENT_CERT_DIR, f'{username}.crt')
+    key_path = os.path.join(CLIENT_CERT_DIR, f'{username}.key')
 
-def send(obj, client):
-    msg = pickle.dumps(obj)
-    msg = bytes(f'{len(msg):<{HEADER}}', FORMAT) + msg
-    client.sendall(msg)
+    if os.path.exists(cert_path) and os.path.exists(key_path):
+        logger.info(f"Client cert and key for '{username}' already exist.")
+        return cert_path, key_path
 
-def hash_data(data):
-    return hashlib.sha256(data).hexdigest()
+    logger.info(f"Generating new client certificate for '{username}'...")
 
-def read_file(filepath):
-    if not os.path.isfile(filepath):
-        print(f"[ERROR] File '{filepath}' not found.")
-        return None, None
+    # Load CA key and cert
+    with open(CA_KEY, 'rb') as f:
+        ca_private_key = serialization.load_pem_private_key(f.read(), password=None)
+    with open(CA_CERT, 'rb') as f:
+        ca_cert = x509.load_pem_x509_certificate(f.read())
+
+    # Generate client key
+    client_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    client_subject = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, username),
+    ])
+
+    client_cert = (
+        x509.CertificateBuilder()
+        .subject_name(client_subject)
+        .issuer_name(ca_cert.subject)
+        .public_key(client_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.utcnow())
+        .not_valid_after(datetime.utcnow() + timedelta(days=365))
+        .sign(ca_private_key, hashes.SHA256())
+    )
+
+    with open(cert_path, 'wb') as f:
+        f.write(client_cert.public_bytes(serialization.Encoding.PEM))
+
+    with open(key_path, 'wb') as f:
+        f.write(client_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption()
+        ))
+
+    logger.info(f"Client certificate for '{username}' generated.")
+    return cert_path, key_path
+
+async def send_file(reader, writer, filepath, username):
+    username_bytes = username.encode()
+    writer.write(len(username_bytes).to_bytes(2, 'big'))
+    writer.write(username_bytes)
+
+    filename = os.path.basename(filepath)
+    writer.write(len(filename).to_bytes(2, 'big'))
+    writer.write(filename.encode())
+
+    file_size = os.path.getsize(filepath)
+    writer.write(file_size.to_bytes(8, 'big'))
+
     with open(filepath, 'rb') as f:
-        return os.path.basename(filepath), f.read()
+        while chunk := f.read(2048):
+            writer.write(len(chunk).to_bytes(4, 'big'))
+            writer.write(chunk)
+            writer.write(calculate_checksum(chunk).encode())
+            await writer.drain()
 
-def send_file(client, filepath):
-    filename, filedata = read_file(filepath)
-    if not filename or not filedata:
-        return
+    logger.info("File sent to server.")
 
-    filehash = hash_data(filedata)
-    retries = 0
-    max_retries = 3
+async def receive_chunks(reader, dest_path):
+    expected_size = int.from_bytes(await reader.readexactly(8), 'big')
+    received = 0
+    count = 0
+    with open(dest_path, 'wb') as f:
+        while received < expected_size:
+            chunk_size = int.from_bytes(await reader.readexactly(4), 'big')
+            chunk = await reader.readexactly(chunk_size)
+            checksum = (await reader.readexactly(64)).decode()
+            if calculate_checksum(chunk) != checksum:
+                logger.warning("Checksum mismatch during download!")
+                raise ValueError("Checksum mismatch during download!")
+            f.write(chunk)
+            received += chunk_size
+            count += 1
 
-    while retries <= max_retries:
-        send({
-            "type": UPLOAD_FILE_MESSAGE,
-            "filename": filename,
-            "filedata": filedata,
-            "hash": filehash
-        }, client)
+    logger.info(f"Received file from server. Total chunks: {count}")
 
-        # Wait for ACK or RESEND
-        try:
-            msg_length = client.recv(HEADER)
-            msg_len = int(msg_length.decode(FORMAT).strip())
-            full_msg = b''
-            while len(full_msg) < msg_len:
-                full_msg += client.recv(PACKET)
+async def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--username', required=True, help='Unique username for this client')
+    args = parser.parse_args()
 
-            resp = pickle.loads(full_msg)
+    username = args.username
+    filepath = os.path.join(STORAGE_DIR, 'client_sample.txt')
+    dest_path = os.path.join(STORAGE_DIR, f'{username}_received.txt')
 
-            if isinstance(resp, dict):
-                if resp.get("type") == ACK_FILE:
-                    print(f"[SUCCESS] File '{filename}' uploaded and verified.")
-                    break
-                elif resp.get("type") == RESEND_FILE:
-                    print(f"[RETRY] Server requested resend ({resp.get('reason')}). Attempt {retries+1}")
-                    retries += 1
-            else:
-                print("[WARNING] Unexpected response from server.")
-                retries += 1
-        except Exception as e:
-            print(f"[ERROR] During file send: {e}")
-            retries += 1
+    cert_path, key_path = generate_client_cert(username)
 
-    if retries > max_retries:
-        print(f"[FAILED] Could not send '{filename}' after {max_retries} attempts.")
+    ssl_ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=CA_CERT)
+    ssl_ctx.load_cert_chain(certfile=cert_path, keyfile=key_path)
 
-def run():
-    client = createSocket()
-    print(f"[CONNECTED] Client connected to {args.ip}")
+    reader, writer = await asyncio.open_connection(SERVER_HOST, SERVER_PORT, ssl=ssl_ctx)
+    await send_file(reader, writer, filepath, username)
+    await receive_chunks(reader, dest_path)
 
-    try:
-        send({"type": SET_USERNAME_MESSAGE, "username": args.name}, client)
-        filepath = input("Enter file path to upload: ").strip()
-        send_file(client, filepath)
-        # send(DISCONNECT_MESSAGE, client)
-        # client.close()
-        # print(f"[DISCONNECTED]")
-    except KeyboardInterrupt:
-        send(DISCONNECT_MESSAGE, client)
-        print("\n[KEYBOARD INTERRUPT]")
+    writer.close()
+    await writer.wait_closed()
 
-### START
-if __name__ == "__main__":
-    run()
+if __name__ == '__main__':
+    asyncio.run(main())
