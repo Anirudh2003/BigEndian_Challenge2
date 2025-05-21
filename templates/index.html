@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+    <title>Secure File Transfer</title>
+</head>
+<body>
+    <h2>Upload File</h2>
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <ul style="color:red;">
+          {% for message in messages %}
+            <li>{{ message }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+
+    <form action="/upload" method="post" enctype="multipart/form-data">
+    Username: <input type="text" name="username" required><br>
+    Upload Folder: <input type="file" name="files" webkitdirectory directory multiple required><br>
+    <input type="submit" value="Upload">
+    </form>
+
+</body>
+</html>

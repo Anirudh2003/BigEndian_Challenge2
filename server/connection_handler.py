@@ -22,10 +22,11 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         filename = (await reader.readexactly(filename_size)).decode()
 
         filepath = os.path.join(STORAGE_DIR, f'server_{username}_{filename}')
-        await receive_file(reader, filepath)
+        await receive_file(reader, writer, filepath)
 
         logger.info(f"Received file '{filename}' from user '{username}', sending back in chunks.")
-        await send_file(writer, filepath)
+        await send_file(writer, filepath, username=username)
+
         logger.info("Transfer complete.")
     except Exception as e:
         logger.error(f"Error handling client: {e}")
