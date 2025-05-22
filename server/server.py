@@ -1,4 +1,3 @@
-# --- file: server/server.py ---
 import asyncio
 import ssl
 import logging
