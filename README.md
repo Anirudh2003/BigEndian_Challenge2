@@ -1,7 +1,7 @@
 # 🔐 Secure Multi User File Transfer System
 
 
-This is a **secure, SSL-enabled file transfer system** with end-to-end verification using **digital certificates**. The system is built using **Flask (for frontend)**, **Python asyncio (for async transfers)**, and **certificate-based TLS authentication** to ensure secure and verified communications between client and server.
+This is a **secure, SSL-enabled Mutli-Client file transfer system** with end-to-end verification using **digital certificates**. The system is built using **Flask (for frontend)**, **Python asyncio (for async transfers)**, and **certificate-based TLS authentication** to ensure secure and verified communications between client and server.
 
 ---
 
