@@ -7,6 +7,7 @@ This is a **secure, SSL-enabled Mutli-Client file transfer system** with end-to-
 
 ## 🧩 Features
 
+- 🤵 **Multi Client** isolated over security certificates
 - 🔐 **TLS/SSL Communication** using self-signed certificates
 - 🧾 **Certificate-based authentication** (CA, client, and server certs)
 - 📤📥 **Chunked file transfer** to support large files and resilience
