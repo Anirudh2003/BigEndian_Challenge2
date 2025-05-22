@@ -144,7 +144,7 @@ Use the form to upload one or more files.
 ## 📙 Additional Notes
 
 - Had an idea to deploy the server in nginx so that the load balancing can be achieved along with handling http traffic but han't done it because of screening to be conducting of the core functionality of server.
-- If everything works, the server and the certificates can be hosted in nginx and a server can be made and in similar way flask server can also be hosted in a apache server or uvicorn
+- If everything works, the server and the certificates can be hosted in nginx and a server can be made available on http requests and in similar way flask server can also be hosted in a apache server or uvicorn
 
 
 
